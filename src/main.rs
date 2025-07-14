@@ -1,38 +1,24 @@
-use async_std::{
-    net::TcpListener,
-    net::TcpStream,
-    task::{self, JoinHandle},
-};
-use futures::future::{self, join_all};
+use async_std::task::{self, JoinHandle};
+use futures::future::join_all;
 use num::complex::Complex;
 use speedy2d::{
     color::Color,
     dimen::Vector2,
-    // image::{self, ImageHandle},
     window::{WindowHandler, WindowHelper},
-    Graphics2D,
-    Window,
+    Graphics2D, Window,
 };
 use std::{
-    future::{ready, Future, IntoFuture, Ready},
-    pin::Pin,
-    process::Output,
-    sync::{Arc, Mutex},
-    task::{Context, Poll, Waker},
+    env,
+    future::{ready, IntoFuture, Ready},
     thread,
-    time::Duration,
     time::Instant,
 };
-// use std::{fmt::Debug, thread};
 
-const WINDOW_WIDTH: u32 = 1024;
-const WINDOW_HEIGHT: u32 = 1024;
+const WINDOW_WIDTH: u32 = 2048;
+const WINDOW_HEIGHT: u32 = 2048;
 const MAX_DEPTH: u32 = 1000;
-const MAX_COLORS: u32 = 16000000;
-const COLOR_FACTOR: u32 = MAX_COLORS / MAX_DEPTH;
-// const DEBUG: bool = true;
-static mut COUNTER: u32 = 0;
-// const CROSS: bool = true;
+// const MAX_COLORS: u32 = 16000000;
+// const COLOR_FACTOR: u32 = MAX_COLORS / MAX_DEPTH;
 
 #[derive(Copy, Clone)]
 struct Zoom {
@@ -75,65 +61,68 @@ impl IntoFuture for Bitmap {
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+    let timings = args.iter().any(|a| a == "timing");
     let window =
         Window::new_centered("Title", (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)).unwrap();
     let zoom_status = Zoom::new(1.0, 0.0, 0.0);
     let mouse_position: Vector2<f64> = Vector2::new(0.0, 0.0);
     let bitmaps: Vec<Bitmap> = vec![];
+
+    // if timings {
+    //     println!("{} {}", timings, &args[1]);
+    //     thread::spawn(|| test(&window));
+    // }
+
     window.run_loop(MyWindowHandler {
         zoom_status,
         mouse_position,
         bitmaps,
         should_clear: false,
+        timings: timings,
     });
 }
 
-fn calculate_color(c: Complex<f64>) -> Color {
-    // unsafe {
-    // COUNTER += 1;
-    // }
-    // let mut x_old = 0.0;
-    // let mut y_old = 0.0;
-    // let mut x2 = 0.0;
-    // let mut y2 = 0.0;
-    // let mut w = 0.0;
-    let mut depth = 0;
-    // let mut period = 0;
+fn test(window_handler: &mut MyWindowHandler, helper: &WindowHelper) {
+    let total = Instant::now();
 
-    let mut z = Complex::new(0.0, 0.0);
-    while z.norm() <= 2.0 && depth < MAX_DEPTH {
-        z = z * z + c;
+    POINTS.iter().for_each(|p| {
+        let position: Vector2<f64> = pixel_to_coordinate(p.x, p.y, &mut window_handler.zoom_status);
+        let z = window_handler.zoom_status;
+        window_handler.zoom_status = zoom_to(true, position, &z);
+
+        futures::executor::block_on(async {
+            let split_spawn_time = Instant::now();
+            window_handler.bitmaps = split_and_spawn(8, 8, z).await;
+            helper.request_redraw();
+
+            let t = split_spawn_time.elapsed().as_millis() as f32 / 1000.0;
+            println!("{}x t: {}", z.zoom_factor, t);
+        });
+    });
+    let t = total.elapsed().as_millis() as f32 / 1000.0;
+    println!("total: {}", t);
+}
+
+fn calculate_color(c: Complex<f64>) -> Color {
+    let mut x2 = 0.0;
+    let mut y2 = 0.0;
+    let mut w = 0.0;
+    let mut depth = 0;
+
+    while x2 + y2 < 4.0 && depth < MAX_DEPTH {
+        let x = x2 - y2 + c.re;
+        let y = w - x2 - y2 + c.im;
+        x2 = x * x;
+        y2 = y * y;
+        w = x + y;
+        w = w * w;
         depth += 1;
     }
-    // while x2 + y2 < 4.0 && depth < MAX_DEPTH {
-    //     let x = x2 - y2 + c.re;
-    //     let y = w - x2 - y2 + c.im;
-    //     x2 = x * x;
-    //     y2 = y * y;
-    //     w = x + y;
-    //     w = w * w;
-    //     depth += 1;
-    // }
     if depth == MAX_DEPTH {
         Color::BLACK
     } else {
-        // let m = depth as f64 + 1.0 - w.abs().log2().log10();
-        // if depth as f32 / 400.0 > 0.02 {
-        // Color::from_hex_rgb(depth * COLOR_FACTOR / 10 + MAX_DEPTH / depth)
-        // const n: u32 = 16;
-        // let i = MAX_DEPTH / depth;
-        // const whiteLevel: u32 = 0x0f0f0f;
-        // Color::from_hex_rgb(MAX_DEPTH / depth * 0x0f0f0f + depth * COLOR_FACTOR / 16)
-        // Color::from_hex_rgb(depth * COLOR_FACTOR / 10)
-        // let z2 = z*z + c;
-        // let ln2: f64 = (2.0 as f64).ln();
-        // Color::from_hex_rgb(10 * depth + ((1.0 - z2.norm().ln().ln() / ln2) * 10.0) as u32)
-        Color::from_hex_rgb(
-            1 * (depth) - ((0.0 * z.norm().log10().log10() / 2.0_f64.log10()) as u32),
-        )
-        // } else {
-        // Color::BLACK
-        // }
+        Color::from_hex_rgb(depth)
     }
 }
 
@@ -162,14 +151,10 @@ fn get_pixel_color(x: u32, y: u32, zoom: &Zoom) -> Color {
 
 fn set_pixel_color(x: u32, y: u32, color: Color, bitmap: &mut Bitmap) {
     let pixel = (x - bitmap.location.0 + bitmap.size.0 * (y - bitmap.location.1)) * 4;
-    let r = (color.r() * 255.0) as u8;
-    let g = (color.g() * 255.0) as u8;
-    let b = (color.b() * 255.0) as u8;
-    let a = 255 as u8;
-    bitmap.pixels[pixel as usize] = r;
-    bitmap.pixels[pixel as usize + 1] = g;
-    bitmap.pixels[pixel as usize + 2] = b;
-    bitmap.pixels[pixel as usize + 3] = a;
+    bitmap.pixels[pixel as usize] = (color.r() * 255.0) as u8;
+    bitmap.pixels[pixel as usize + 1] = (color.g() * 255.0) as u8;
+    bitmap.pixels[pixel as usize + 2] = (color.b() * 255.0) as u8;
+    bitmap.pixels[pixel as usize + 3] = 255 as u8;
 }
 
 fn calculate_rectangle(
@@ -187,75 +172,6 @@ fn calculate_rectangle(
         }
     }
 }
-
-// async fn split_and_spawn(
-//     tl_x: u32,
-//     tl_y: u32,
-//     br_x: u32,
-//     br_y: u32,
-//     level: u8,
-//     zoom: &Zoom,
-// ) -> Vec<Bitmap> {
-//     let width = br_x - tl_x + 1;
-//     let height = br_y - tl_y + 1;
-//     let bitmap: Bitmap = Bitmap {
-//         pixels: vec![0; (width * height * 4) as usize],
-//         size: (width, height),
-//         location: (tl_x, tl_y),
-//     };
-//     let mid_x = tl_x + width / 2;
-//     let mid_y = tl_y + height / 2;
-//     if level <= 1 {
-//         let tasks = vec![
-//             task::spawn(split_and_spawn(
-// //                 tl_x + 1,
-// //                 tl_y + 1,
-// //                 mid_x - 1,
-// //                 mid_y - 1,
-// //                 level + 1,
-// //                 zoom,
-// //             )),
-// //             task::spawn(split_and_spawn(tl_x, tl_y, br_x, br_y, level + 1, zoom)),
-// //             task::spawn(split_and_spawn(tl_x, tl_y, br_x, br_y, level + 1, zoom)),
-// //             task::spawn(split_and_spawn(tl_x, tl_y, br_x, br_y, level + 1, zoom)),
-//         ];
-//         let result = join_all(tasks).await;
-//         let bitmaps = result.into_iter().flatten().collect::<Vec<Bitmap>>();
-//     } else {
-//         split(
-//             tl_x + 1,
-//             tl_y + 1,
-//             mid_x - 1,
-//             mid_y - 1,
-//             level + 1,
-//             pixels,
-//             zoom,
-//         );
-//         // println!("\ntop right");
-//         split(
-//             mid_x,
-//             tl_y + 1,
-//             br_x - 1,
-//             mid_y - 1,
-//             level + 1,
-//             pixels,
-//             zoom,
-//         );
-//         // println!("\nbottom left");
-//         split(
-//             tl_x + 1,
-//             mid_y,
-//             mid_x - 1,
-//             br_y - 1,
-//             level + 1,
-//             pixels,
-//             zoom,
-//         );
-//     }
-//     let mut vec = Vec::new();
-//     vec.push(bitmap);
-//     vec
-// }
 
 async fn split_and_spawn(n_x: u32, n_y: u32, zoom: Zoom) -> Vec<Bitmap> {
     let width = WINDOW_WIDTH / n_x;
@@ -282,26 +198,19 @@ async fn split_and_spawn(n_x: u32, n_y: u32, zoom: Zoom) -> Vec<Bitmap> {
             }));
         }
     }
-    future::join_all(tasks).await
+    join_all(tasks).await
 }
 
 fn split(tl_x: u32, tl_y: u32, br_x: u32, br_y: u32, level: u8, bitmap: &mut Bitmap, zoom: &Zoom) {
     let width = br_x - tl_x;
     let height = br_y - tl_y;
     let mut must_split = false;
-    // 17 is ideal
+
     if width <= 17 || height <= 17 {
         calculate_rectangle(tl_x, tl_y, br_x, br_y, bitmap, zoom);
         return;
     }
-    // let mut color: Color;
-    // if level % 2 == 1 {
-    //     color = Color::RED;
-    // } else if level == 0 {
-    //     color = Color::WHITE;
-    // } else {
-    //     color = Color::BLUE;
-    // }
+
     for x in tl_x..=br_x {
         let top_color: Color = get_pixel_color(x, tl_y, zoom);
         let bottom_color: Color = get_pixel_color(x, br_y, zoom);
@@ -329,7 +238,6 @@ fn split(tl_x: u32, tl_y: u32, br_x: u32, br_y: u32, level: u8, bitmap: &mut Bit
         let mid_x = tl_x + width / 2;
         let mid_y = tl_y + height / 2;
 
-        // println!("\ntop left");
         split(
             tl_x + 1,
             tl_y + 1,
@@ -339,7 +247,6 @@ fn split(tl_x: u32, tl_y: u32, br_x: u32, br_y: u32, level: u8, bitmap: &mut Bit
             bitmap,
             zoom,
         );
-        // println!("\ntop right");
         split(
             mid_x,
             tl_y + 1,
@@ -349,7 +256,6 @@ fn split(tl_x: u32, tl_y: u32, br_x: u32, br_y: u32, level: u8, bitmap: &mut Bit
             bitmap,
             zoom,
         );
-        // println!("\nbottom left");
         split(
             tl_x + 1,
             mid_y,
@@ -359,15 +265,7 @@ fn split(tl_x: u32, tl_y: u32, br_x: u32, br_y: u32, level: u8, bitmap: &mut Bit
             bitmap,
             zoom,
         );
-        // }
-        // println!("\nbottom right");
         split(mid_x, mid_y, br_x - 1, br_y - 1, level + 1, bitmap, zoom);
-    } else {
-        for x in tl_x + 1..br_x - 1 {
-            for y in tl_y + 1..br_y - 1 {
-                set_pixel_color(x, y, Color::WHITE, bitmap)
-            }
-        }
     }
 }
 
@@ -376,6 +274,7 @@ struct MyWindowHandler {
     mouse_position: Vector2<f64>,
     bitmaps: Vec<Bitmap>,
     should_clear: bool,
+    timings: bool,
 }
 
 impl WindowHandler for MyWindowHandler {
@@ -386,24 +285,29 @@ impl WindowHandler for MyWindowHandler {
     ) {
         helper.set_title("Mandelbrot");
 
+        if self.timings {
+            test(self, helper);
+            return;
+        }
+
         futures::executor::block_on(async {
-            let now = Instant::now();
             self.bitmaps = split_and_spawn(4, 4, self.zoom_status).await;
             helper.request_redraw();
-            println!("{}", now.elapsed().as_millis() as f32 / 1000.0);
+            // println!(
+            //     "{}x loc({}, {}) t: {}",
+            //     self.zoom_status.zoom_factor,
+            //     self.zoom_status.term_x,
+            //     self.zoom_status.term_y,
+            //     now.elapsed().as_millis() as f32 / 1000.0
+            // );
         });
-
         // helper.request_redraw();
     }
 
     fn on_draw(&mut self, _helper: &mut WindowHelper, graphics: &mut Graphics2D) {
-        unsafe {
-            COUNTER = 0;
-        }
         if self.should_clear {
             graphics.clear_screen(Color::BLACK);
         }
-        // let mut pixels = vec![0; (WINDOW_WIDTH * WINDOW_WIDTH * 4) as usize];
 
         for bitmap in &self.bitmaps {
             let result = graphics.create_image_from_raw_pixels(
@@ -426,12 +330,12 @@ impl WindowHandler for MyWindowHandler {
         button: speedy2d::window::MouseButton,
     ) {
         self.should_clear = true;
+        println!("{} {}", self.mouse_position.x, self.mouse_position.y);
         let position: Vector2<f64> = pixel_to_coordinate(
             self.mouse_position.x,
             self.mouse_position.y,
             &mut self.zoom_status,
         );
-        // println!("({},{})", position.x, position.y);
         match button {
             speedy2d::window::MouseButton::Left => {
                 self.zoom_status = zoom_to(true, position, &self.zoom_status)
@@ -451,15 +355,80 @@ impl WindowHandler for MyWindowHandler {
             let now = Instant::now();
             self.bitmaps = split_and_spawn(8, 8, self.zoom_status).await;
             helper.request_redraw();
-            unsafe {
-                let t = now.elapsed().as_millis() as f32 / 1000.0;
-                println!("{} count:{}", t, COUNTER);
-            }
+
+            // let t = now.elapsed().as_millis() as f32 / 1000.0;
+            // println!(
+            //     "{}x loc({}, {}) t: {}",
+            //     self.zoom_status.zoom_factor, self.zoom_status.term_x, self.zoom_status.term_y, t
+            // );
         });
     }
+
     fn on_mouse_move(&mut self, _helper: &mut WindowHelper<()>, position: speedy2d::dimen::Vec2) {
         self.mouse_position.x = position.x as f64;
         self.mouse_position.y = position.y as f64;
     }
-    // If desired, on_mouse_move(), on_key_down(), etc...
 }
+
+static POINTS: &[Vector2<f64>] = &[
+    Vector2 {
+        x: 923.0078125,
+        y: 609.1171875,
+    },
+    Vector2 {
+        x: 1028.765625,
+        y: 1021.7421875,
+    },
+    Vector2 {
+        x: 964.2265625,
+        y: 1026.203125,
+    },
+    Vector2 {
+        x: 1034.9609375,
+        y: 1017.640625,
+    },
+    Vector2 {
+        x: 1034.9609375,
+        y: 1017.640625,
+    },
+    Vector2 {
+        x: 1034.9609375,
+        y: 1017.640625,
+    },
+    Vector2 {
+        x: 1034.9609375,
+        y: 1017.640625,
+    },
+    Vector2 {
+        x: 1078.171875,
+        y: 1006.5234375,
+    },
+    Vector2 {
+        x: 1102.3828125,
+        y: 972.7578125,
+    },
+    Vector2 {
+        x: 987.875,
+        y: 993.4453125,
+    },
+    Vector2 {
+        x: 1003.15625,
+        y: 1000.0390625,
+    },
+    Vector2 {
+        x: 1047.2421875,
+        y: 1053.9765625,
+    },
+    Vector2 {
+        x: 1055.359375,
+        y: 1080.0234375,
+    },
+    Vector2 {
+        x: 1055.359375,
+        y: 1080.0234375,
+    },
+    Vector2 {
+        x: 1055.359375,
+        y: 1080.0234375,
+    },
+];
